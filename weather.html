@@ -5,25 +5,34 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>날씨</title>
 <style>
+  * { box-sizing: border-box; }
   body {
     margin: 0;
     min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 1.25rem;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #111;
     color: #fff;
+    padding: 2rem 1.5rem 3rem;
+  }
+  .page {
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  .current {
     text-align: center;
-    padding: 1.5rem;
-    box-sizing: border-box;
+    padding-bottom: 2rem;
+    border-bottom: 1px solid #2a2a2a;
+    margin-bottom: 2rem;
   }
   h1 {
-    font-size: 2rem;
+    font-size: 1.75rem;
     font-weight: 600;
-    margin: 0;
+    margin: 0 0 1rem;
+  }
+  h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin: 0 0 1rem;
   }
   .temp {
     font-size: 4rem;
@@ -33,15 +42,16 @@
   .desc {
     font-size: 1.1rem;
     color: #ccc;
-    margin: 0;
+    margin: 0.25rem 0 0;
   }
   .location {
     font-size: 0.95rem;
     color: #888;
-    margin: 0;
+    margin: 0.25rem 0 0;
   }
   .back-link {
-    margin-top: 1rem;
+    display: inline-block;
+    margin-top: 1.25rem;
     color: #fff;
     text-decoration: none;
     opacity: 0.7;
@@ -53,15 +63,53 @@
   .error {
     color: #ff8080;
   }
+  .muted {
+    color: #888;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+  th, td {
+    padding: 0.6rem 0.5rem;
+    text-align: left;
+    border-bottom: 1px solid #2a2a2a;
+    white-space: nowrap;
+  }
+  th {
+    color: #999;
+    font-weight: 500;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  td.name {
+    white-space: normal;
+    max-width: 220px;
+  }
+  .table-wrap {
+    overflow-x: auto;
+  }
 </style>
 </head>
 <body>
-  <h1>현재 날씨</h1>
-  <div id="status">위치 정보를 불러오는 중...</div>
-  <a class="back-link" href="index.html">&larr; 뒤로가기</a>
+  <div class="page">
+    <section class="current">
+      <h1>현재 날씨</h1>
+      <div id="status">위치 정보를 불러오는 중...</div>
+      <a class="back-link" href="index.html">&larr; 뒤로가기</a>
+    </section>
+
+    <section class="golf">
+      <h2>근처 골프장 날씨</h2>
+      <div id="golf-status" class="muted">골프장 정보를 불러오는 중...</div>
+    </section>
+  </div>
 
   <script>
     const statusEl = document.getElementById('status');
+    const golfStatusEl = document.getElementById('golf-status');
 
     const WEATHER_CODES = {
       0: '맑음', 1: '대체로 맑음', 2: '구름 조금', 3: '흐림',
@@ -77,11 +125,31 @@
       return WEATHER_CODES[code] || '알 수 없음';
     }
 
+    function haversineKm(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+        Math.sin(dLon / 2) ** 2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
     async function fetchWeather(lat, lon) {
       const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m`;
       const res = await fetch(url);
       if (!res.ok) throw new Error('날씨 정보를 가져오지 못했습니다.');
       return res.json();
+    }
+
+    async function fetchWeatherBatch(points) {
+      const lats = points.map(p => p.lat).join(',');
+      const lons = points.map(p => p.lon).join(',');
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}&current=temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('날씨 정보를 가져오지 못했습니다.');
+      const data = await res.json();
+      return Array.isArray(data) ? data : [data];
     }
 
     async function reverseGeocode(lat, lon) {
@@ -98,7 +166,7 @@
       }
     }
 
-    async function render(lat, lon) {
+    async function renderCurrentWeather(lat, lon) {
       try {
         const [weather, place] = await Promise.all([
           fetchWeather(lat, lon),
@@ -115,8 +183,98 @@
       }
     }
 
+    function elementCoords(el) {
+      if (el.type === 'node') return { lat: el.lat, lon: el.lon };
+      if (el.center) return { lat: el.center.lat, lon: el.center.lon };
+      return null;
+    }
+
+    async function findNearbyGolfCourses(lat, lon) {
+      const radii = [20000, 50000, 100000, 200000];
+      for (const radius of radii) {
+        const query = `[out:json][timeout:25];(node["leisure"="golf_course"](around:${radius},${lat},${lon});way["leisure"="golf_course"](around:${radius},${lat},${lon});relation["leisure"="golf_course"](around:${radius},${lat},${lon}););out center;`;
+        const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const data = await res.json();
+        const courses = (data.elements || [])
+          .map(el => {
+            const coords = elementCoords(el);
+            if (!coords) return null;
+            return {
+              name: (el.tags && el.tags.name) || '이름 미상 골프장',
+              lat: coords.lat,
+              lon: coords.lon,
+              distanceKm: haversineKm(lat, lon, coords.lat, coords.lon)
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => a.distanceKm - b.distanceKm);
+
+        if (courses.length >= 10 || radius === radii[radii.length - 1]) {
+          return courses.slice(0, 10);
+        }
+      }
+      return [];
+    }
+
+    async function renderGolfCourses(lat, lon) {
+      try {
+        const courses = await findNearbyGolfCourses(lat, lon);
+        if (courses.length === 0) {
+          golfStatusEl.innerHTML = `<p class="muted">근처에서 골프장을 찾지 못했습니다.</p>`;
+          return;
+        }
+
+        const weatherData = await fetchWeatherBatch(courses);
+
+        const rows = courses.map((course, i) => {
+          const current = weatherData[i] && weatherData[i].current;
+          if (!current) {
+            return `<tr><td class="name">${course.name}</td><td>${course.distanceKm.toFixed(1)}</td><td colspan="4" class="muted">날씨 정보 없음</td></tr>`;
+          }
+          return `
+            <tr>
+              <td class="name">${course.name}</td>
+              <td>${course.distanceKm.toFixed(1)}</td>
+              <td>${Math.round(current.temperature_2m)}&deg;C</td>
+              <td>${describeWeather(current.weather_code)}</td>
+              <td>${current.relative_humidity_2m}%</td>
+              <td>${current.wind_speed_10m}km/h</td>
+            </tr>
+          `;
+        }).join('');
+
+        golfStatusEl.innerHTML = `
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>골프장</th>
+                  <th>거리(km)</th>
+                  <th>기온</th>
+                  <th>날씨</th>
+                  <th>습도</th>
+                  <th>풍속</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        `;
+      } catch (err) {
+        golfStatusEl.innerHTML = `<p class="error">골프장 날씨 정보를 불러오는 데 실패했습니다.</p>`;
+      }
+    }
+
+    function render(lat, lon) {
+      renderCurrentWeather(lat, lon);
+      renderGolfCourses(lat, lon);
+    }
+
     function fallbackToSeoul() {
       statusEl.textContent = '위치 권한이 없어 서울 기준으로 표시합니다...';
+      golfStatusEl.textContent = '골프장 정보를 불러오는 중...';
       render(37.5665, 126.9780);
     }
 
