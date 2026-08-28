@@ -36,10 +36,33 @@
   .weather-link:hover {
     opacity: 0.85;
   }
+  .db-status {
+    font-size: 0.85rem;
+    color: #888;
+  }
+  .db-status.ok { color: #6fd08c; }
+  .db-status.fail { color: #ff8080; }
 </style>
 </head>
 <body>
   <h1>Hello!</h1>
   <a class="weather-link" href="weather.html">오늘의 날씨 보기</a>
+  <p class="db-status" id="db-status">Supabase 연결 확인 중...</p>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="supabase-client.js"></script>
+  <script>
+    supabaseClient.auth.getSession()
+      .then(() => {
+        const el = document.getElementById('db-status');
+        el.textContent = 'Supabase 연결됨';
+        el.classList.add('ok');
+      })
+      .catch(() => {
+        const el = document.getElementById('db-status');
+        el.textContent = 'Supabase 연결 실패';
+        el.classList.add('fail');
+      });
+  </script>
 </body>
 </html>
