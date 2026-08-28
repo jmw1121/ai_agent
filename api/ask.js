@@ -17,22 +17,27 @@ async function supabaseSelect(table, params) {
   return res.json();
 }
 
-async function getChannelStat({ channel_name, metric, granularity, limit }) {
-  const channels = await supabaseSelect(
-    'channel_meta',
-    `channelname=ilike.*${encodeURIComponent(channel_name)}*&select=channelid,channelname,physicalunit&limit=1`
-  );
-  if (!channels.length) {
-    return { error: `채널 "${channel_name}"을(를) 찾지 못했습니다.` };
+const QUERYABLE_TABLES = ['channel_meta', 'basicstat_day', 'basicstat_month', 'freqpeaks_day', 'freqpeaks_month'];
+const FILTER_OPS = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'ilike', 'like'];
+
+async function queryTable({ table, filters, order_by, order_dir, limit }) {
+  if (!QUERYABLE_TABLES.includes(table)) {
+    return { error: `조회할 수 없는 테이블입니다: ${table}. 가능한 테이블: ${QUERYABLE_TABLES.join(', ')}` };
   }
-  const channel = channels[0];
-  const table = `${metric}_${granularity}`;
-  const orderCol = granularity === 'day' ? 'stat_date' : 'stat_month';
-  const rows = await supabaseSelect(
-    table,
-    `channelid=eq.${channel.channelid}&select=*&order=${orderCol}.desc&limit=${limit || 6}`
-  );
-  return { channel, rows: rows.reverse() };
+  const params = new URLSearchParams();
+  params.set('select', '*');
+  if (Array.isArray(filters)) {
+    for (const f of filters) {
+      if (!f || !f.column || !FILTER_OPS.includes(f.op) || f.value === undefined) continue;
+      params.append(f.column, `${f.op}.${f.value}`);
+    }
+  }
+  if (order_by) {
+    params.set('order', `${order_by}.${order_dir === 'asc' ? 'asc' : 'desc'}`);
+  }
+  params.set('limit', String(Math.min(Number(limit) || 20, 500)));
+  const rows = await supabaseSelect(table, params.toString());
+  return { table, row_count: rows.length, rows };
 }
 
 function cosineSimilarity(a, b) {
@@ -76,18 +81,36 @@ const TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'get_channel_stat',
+      name: 'query_table',
       description:
-        '센서 채널의 일별 또는 월별 계측 통계(진동 가속도 basicstat, 진동 주파수 freqpeaks)를 조회한다. 정확한 수치가 필요한 질문에 사용한다.',
+        `계측 데이터 테이블(${QUERYABLE_TABLES.join(', ')}) 중 하나를 조건에 맞게 조회한다. ` +
+        '채널 목록 조회, 특정 채널 검색, 특정 기간·조건의 통계 조회 등 수치·목록 관련 질문 전반에 사용한다. ' +
+        'channel_meta: channelid, channelname, physicalunit, direction. ' +
+        'basicstat_day/month: channelid, stat_date 또는 stat_month, samplecount, valuemin, valuemax, valueavg, stdv_avg, rms_avg. ' +
+        'freqpeaks_day/month: channelid, stat_date 또는 stat_month, peak_count, peakfreq_avg, peakfreq_min, peakfreq_max, peakmagnitude_avg.',
       parameters: {
         type: 'object',
         properties: {
-          channel_name: { type: 'string', description: '채널명 일부 (예: ACC-04-X, 유도선교량)' },
-          metric: { type: 'string', enum: ['basicstat', 'freqpeaks'] },
-          granularity: { type: 'string', enum: ['day', 'month'] },
-          limit: { type: 'integer', description: '조회할 최근 기간 수, 기본 6' },
+          table: { type: 'string', enum: QUERYABLE_TABLES },
+          filters: {
+            type: 'array',
+            description:
+              '조건 목록 (전체 조회 시 생략 가능). 예: [{"column":"channelname","op":"ilike","value":"*ACC*"}]',
+            items: {
+              type: 'object',
+              properties: {
+                column: { type: 'string' },
+                op: { type: 'string', enum: FILTER_OPS },
+                value: { type: 'string' },
+              },
+              required: ['column', 'op', 'value'],
+            },
+          },
+          order_by: { type: 'string', description: '정렬 기준 컬럼명 (선택)' },
+          order_dir: { type: 'string', enum: ['asc', 'desc'] },
+          limit: { type: 'integer', description: '반환할 최대 행 수, 기본 20, 최대 500' },
         },
-        required: ['channel_name', 'metric', 'granularity'],
+        required: ['table'],
       },
     },
   },
@@ -137,20 +160,28 @@ module.exports = async (req, res) => {
       {
         role: 'system',
         content:
-          '너는 인천공항 활주로/구조물 계측 데이터를 설명하는 AI 에이전트다. 수치 질문은 get_channel_stat 툴로, 기준/원리 질문은 search_docs 툴로 답한다. 한국어로 간결하게 답한다.',
+          '너는 인천공항 활주로/구조물 계측 데이터를 설명하는 AI 에이전트다. 채널 목록·수치·조건 조회는 query_table 툴로, 기준/원리 질문은 search_docs 툴로 답한다. ' +
+          'basicstat_day/month, freqpeaks_day/month에는 channelname 컬럼이 없다 — 채널명으로 특정 채널의 수치를 물으면 먼저 query_table(channel_meta, channelname ilike)로 channelid를 찾고, 그 channelid로 다시 query_table을 호출해 통계를 조회한다. ' +
+          'query_table의 filters는 필요할 때만 채우고, 전체 목록을 물으면 filters 없이 호출한다. 필요하면 여러 번 툴을 호출해도 된다. 한국어로 간결하게 답한다.',
       },
       { role: 'user', content: question },
     ];
 
-    const first = await callOpenAI(messages);
-    messages.push(first);
+    const MAX_TOOL_ROUNDS = 5;
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const reply = await callOpenAI(messages);
+      messages.push(reply);
 
-    if (first.tool_calls) {
-      for (const call of first.tool_calls) {
+      if (!reply.tool_calls) {
+        res.status(200).json({ answer: reply.content });
+        return;
+      }
+
+      for (const call of reply.tool_calls) {
         const args = JSON.parse(call.function.arguments);
         let result;
-        if (call.function.name === 'get_channel_stat') {
-          result = await getChannelStat(args);
+        if (call.function.name === 'query_table') {
+          result = await queryTable(args);
         } else if (call.function.name === 'search_docs') {
           result = await searchDocs(args);
         } else {
@@ -162,12 +193,9 @@ module.exports = async (req, res) => {
           content: JSON.stringify(result),
         });
       }
-      const final = await callOpenAI(messages);
-      res.status(200).json({ answer: final.content });
-      return;
     }
 
-    res.status(200).json({ answer: first.content });
+    res.status(200).json({ answer: '툴 호출 횟수가 많아 답변을 완성하지 못했습니다. 질문을 더 구체적으로 나눠 물어봐 주세요.' });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
