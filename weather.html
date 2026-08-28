@@ -154,13 +154,11 @@
 
     async function reverseGeocode(lat, lon) {
       try {
-        const url = `https://geocoding-api.open-meteo.com/v1/reverse?latitude=${lat}&longitude=${lon}&language=ko`;
+        const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=ko`;
         const res = await fetch(url);
         if (!res.ok) return null;
         const data = await res.json();
-        const place = data.results && data.results[0];
-        if (!place) return null;
-        return [place.name, place.admin1].filter(Boolean).join(', ');
+        return [data.city || data.locality, data.principalSubdivision].filter(Boolean).join(', ');
       } catch {
         return null;
       }
@@ -189,14 +187,42 @@
       return null;
     }
 
+    const OVERPASS_ENDPOINTS = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.osm.ch/api/interpreter',
+      'https://overpass.openstreetmap.fr/api/interpreter'
+    ];
+
+    async function queryOverpass(query) {
+      let lastError;
+      for (const endpoint of OVERPASS_ENDPOINTS) {
+        try {
+          const url = `${endpoint}?data=${encodeURIComponent(query)}`;
+          const res = await fetch(url);
+          if (!res.ok) {
+            lastError = new Error(`Overpass HTTP ${res.status}`);
+            continue;
+          }
+          return await res.json();
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError || new Error('모든 Overpass 서버 요청이 실패했습니다.');
+    }
+
     async function findNearbyGolfCourses(lat, lon) {
       const radii = [20000, 50000, 100000, 200000];
+      let lastError = null;
       for (const radius of radii) {
         const query = `[out:json][timeout:25];(node["leisure"="golf_course"](around:${radius},${lat},${lon});way["leisure"="golf_course"](around:${radius},${lat},${lon});relation["leisure"="golf_course"](around:${radius},${lat},${lon}););out center;`;
-        const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
-        const res = await fetch(url);
-        if (!res.ok) continue;
-        const data = await res.json();
+        let data;
+        try {
+          data = await queryOverpass(query);
+        } catch (err) {
+          lastError = err;
+          continue;
+        }
         const courses = (data.elements || [])
           .map(el => {
             const coords = elementCoords(el);
@@ -215,6 +241,7 @@
           return courses.slice(0, 10);
         }
       }
+      if (lastError) throw lastError;
       return [];
     }
 
